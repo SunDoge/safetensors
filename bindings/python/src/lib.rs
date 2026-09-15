@@ -5,6 +5,8 @@ mod dlpack;
 mod metal;
 
 mod engine;
+#[cfg(all(unix, target_endian = "little"))]
+mod mlx;
 
 use core::slice;
 use memmap2::{Mmap, MmapOptions};
@@ -660,6 +662,9 @@ struct Open {
     device: Device,
     storage: Arc<Storage>,
     prefetch_loader: Option<Loader>,
+    // Keep the validated file open for independent MLX copy-on-write maps.
+    #[cfg(all(unix, target_endian = "little"))]
+    mlx_file: Option<File>,
 }
 
 impl Open {
@@ -764,6 +769,8 @@ impl Open {
                 device,
                 storage: Arc::new(Storage::Pread(file)),
                 prefetch_loader,
+                #[cfg(all(unix, target_endian = "little"))]
+                mlx_file: None,
             });
         }
 
@@ -859,6 +866,8 @@ impl Open {
         };
 
         let storage = Arc::new(storage);
+        #[cfg(all(unix, target_endian = "little"))]
+        let mlx_file = (framework == Framework::Mlx).then_some(file);
 
         Ok(Self {
             metadata,
@@ -867,6 +876,8 @@ impl Open {
             device,
             storage,
             prefetch_loader: None,
+            #[cfg(all(unix, target_endian = "little"))]
+            mlx_file,
         })
     }
 
@@ -920,6 +931,21 @@ impl Open {
         let info = self.metadata.info(name).ok_or_else(|| {
             SafetensorError::new_err(format!("File does not contain tensor {name}",))
         })?;
+
+        #[cfg(all(unix, target_endian = "little"))]
+        if self.framework == Framework::Mlx {
+            let source = match self.storage.as_ref() {
+                Storage::Pread(file) => Some((file.as_ref(), Backend::Pread)),
+                _ => self.mlx_file.as_ref().map(|file| (file, Backend::Mmap)),
+            };
+            if let Some((file, backend)) = source {
+                if let Some(tensor) =
+                    Python::attach(|py| mlx::load_tensor(py, file, backend, self.offset, info))?
+                {
+                    return Ok(tensor);
+                }
+            }
+        }
 
         if let Some(loader) = self.prefetch_loader.as_ref() {
             let idx = self.metadata.tensor_idx(name).ok_or_else(|| {
@@ -2386,11 +2412,9 @@ fn torch_supports_mps_dlpack() -> bool {
 /// arm. The remaining frameworks return an explicit error to keep the
 /// surface honest if the upstream guard is ever widened:
 ///
-/// - **MLX**: no `from_dlpack` exists; `mx.array(capsule)` fails. The
-///   public Metal-zero-copy path tracked at ml-explore/mlx#2855 isn't
-///   shipped yet (needs allocator::Buffer wrapping + Deleter plumbing).
-///   The numpy-buffer-protocol path is *not* end-to-end zero-copy:
-///   MLX copies into its own MTLBuffer on first GPU dispatch.
+/// - **MLX**: uses its own page-aligned host-buffer path in `mlx`, with
+///   `mx.asarray` adopting memory when supported by the installed MLX
+///   backend. It does not use this torch-specific MPS dispatch.
 /// - **Numpy / Jax / Paddle / Flax**: not relevant for MPS; none have a
 ///   functioning MPS device path.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2555,7 +2579,6 @@ fn create_tensor<'a>(
                 .bind(py);
                 module
                     .getattr(intern!(py, "core"))?
-                    // .getattr(intern!(py, "array"))?
                     .call_method1("array", (tensor,))?
             }
             Framework::Paddle => {

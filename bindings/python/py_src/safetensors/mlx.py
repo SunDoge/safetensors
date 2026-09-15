@@ -1,9 +1,9 @@
 import os
 from typing import Dict, Optional, Union
 
+import mlx.core as mx
 import numpy as np
 
-import mlx.core as mx
 from safetensors import numpy, safe_open
 
 
@@ -111,7 +111,15 @@ def load_file(
             The name of the file which contains the tensors
         backend (`str`, *optional*, defaults to `"mmap"`):
             Storage backend used to serve tensor bytes. `"mmap"` (default)
-            and `"pread"` uses `pread(2)` to read tensor bytes.
+            maps the file; `"pread"` reads tensor bytes with `pread(2)`.
+
+    Note:
+        On little-endian Unix systems, full tensors use page-aligned private
+        file mappings (`"mmap"`) or page-aligned read buffers (`"pread"`) when
+        MLX exposes `asarray`. MLX can share these buffers on supported Metal
+        backends; older MLX versions and CPU-only backends may copy. Returned
+        arrays keep shared storage alive after the file is closed, and writes
+        do not modify the file. Slice loading still uses the copy path.
 
     Returns:
         `Dict[str, mx.array]`: dictionary that contains name as key, value as `mx.array`
@@ -119,7 +127,7 @@ def load_file(
     Example:
 
     ```python
-    from safetensors.flax import load_file
+    from safetensors.mlx import load_file
 
     file_path = "./my_folder/bert.safetensors"
     loaded = load_file(file_path)

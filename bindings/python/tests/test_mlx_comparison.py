@@ -1,24 +1,16 @@
-import platform
 import unittest
 
+try:
+    import mlx.core as mx
+    from safetensors.mlx import load_file, save_file
 
-HAS_MLX = False
-if platform.system() == "Darwin":
-    # This platform is not supported, we don't want to crash on import
-    # This test will be skipped anyway.
-    try:
-        import mlx.core as mx
+    from safetensors import safe_open
 
-        HAS_MLX = True
-    except ImportError:
-        pass
-    if HAS_MLX:
-        from safetensors import safe_open
-        from safetensors.mlx import load_file, save_file
+    HAS_MLX = True
+except ImportError:
+    HAS_MLX = False
 
 
-# MLX only exists on Mac
-@unittest.skipIf(platform.system() != "Darwin", "Mlx is not available on non Mac")
 @unittest.skipIf(not HAS_MLX, "Mlx is not available.")
 class LoadTestCase(unittest.TestCase):
     def setUp(self):
